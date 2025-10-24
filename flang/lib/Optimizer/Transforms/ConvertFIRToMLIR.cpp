@@ -26,6 +26,20 @@ public:
   void runOnOperation() override;
 };
 
+/// TODO: how do we want to enforce this in MLIR? Can we manipulate the fast
+/// math flags?
+struct FIRNoReassocOpLowering
+    : public mlir::OpConversionPattern<fir::NoReassocOp> {
+  using mlir::OpConversionPattern<fir::NoReassocOp>::OpConversionPattern;
+
+  llvm::LogicalResult
+  matchAndRewrite(fir::NoReassocOp noreassoc, OpAdaptor adaptor,
+                  mlir::ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOp(noreassoc, adaptor.getOperands()[0]);
+    return mlir::success();
+  }
+};
+
 class FIRLoadOpLowering : public mlir::OpConversionPattern<fir::LoadOp> {
 public:
   using mlir::OpConversionPattern<fir::LoadOp>::OpConversionPattern;
@@ -260,12 +274,12 @@ void ConvertFIRToMLIRPass::runOnOperation() {
   mlir::RewritePatternSet patterns(&getContext());
   mlir::ConversionTarget target(getContext());
 
-  patterns.add<FIRAllocOpLowering, FIRLoadOpLowering, FIRStoreOpLowering,
-               FIRConvertOpLowering, FIRXArrayCoorOpLowering, FuncOpLowering>(
-      converter, ctx);
+  patterns.add<FIRNoReassocOpLowering, FIRAllocOpLowering, FIRLoadOpLowering,
+               FIRStoreOpLowering, FIRConvertOpLowering,
+               FIRXArrayCoorOpLowering, FuncOpLowering>(converter, ctx);
 
   target.addIllegalOp<fir::AllocaOp, fir::LoadOp, fir::StoreOp, fir::ConvertOp,
-                      fir::cg::XArrayCoorOp>();
+                      fir::cg::XArrayCoorOp, fir::NoReassocOp>();
   target.addDynamicallyLegalOp<mlir::func::FuncOp>([](mlir::func::FuncOp op) {
     return !llvm::any_of(llvm::concat<const mlir::Type>(op.getResultTypes(),
                                                         op.getArgumentTypes()),
