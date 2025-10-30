@@ -112,6 +112,47 @@ public:
   }
 };
 
+static mlir::Value makeFIRMemref(mlir::ConversionPatternRewriter &rewriter,
+                                 mlir::Location loc, mlir::Value memref,
+                                 mlir::ValueRange shape) {
+  auto metadata =
+      mlir::memref::ExtractStridedMetadataOp::create(rewriter, loc, memref);
+  auto base = metadata.getBaseBuffer();
+  auto offset = metadata.getOffset();
+  size_t rank = shape.size();
+  auto sizes = llvm::to_vector_of<mlir::OpFoldResult>(shape);
+  mlir::SmallVector<mlir::OpFoldResult> strides;
+
+  mlir::Value stride = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
+  for (size_t i = 0; i < rank; ++i) {
+    strides.push_back(stride);
+    stride = mlir::arith::MulIOp::create(rewriter, loc, stride, shape[i]);
+  }
+
+  return mlir::memref::ReinterpretCastOp::create(rewriter, loc, base, offset,
+                                                 sizes, strides);
+}
+
+class FIRXEmboxLowering : public mlir::OpConversionPattern<fir::cg::XEmboxOp> {
+public:
+  using mlir::OpConversionPattern<fir::cg::XEmboxOp>::OpConversionPattern;
+
+  mlir::LogicalResult
+  matchAndRewrite(fir::cg::XEmboxOp op, OpAdaptor adaptor,
+                  mlir::ConversionPatternRewriter &rewriter) const override {
+    if (!mlir::isa<fir::ReferenceType>(op.getMemref().getType()) ||
+        !op.getSlice().empty() || !op.getShift().empty())
+      return mlir::failure();
+
+    mlir::Value memref = makeFIRMemref(rewriter, op.getLoc(),
+                                       adaptor.getMemref(), adaptor.getShape());
+
+    rewriter.replaceOp(op, {memref});
+
+    return mlir::success();
+  }
+};
+
 class FIRXArrayCoorOpLowering
     : public mlir::OpConversionPattern<fir::cg::XArrayCoorOp> {
 public:
@@ -126,23 +167,8 @@ public:
     mlir::Location loc = op.getLoc();
     auto resultType = mlir::cast<mlir::MemRefType>(
         getTypeConverter()->convertType(op.getType()));
-    auto metadata = mlir::memref::ExtractStridedMetadataOp::create(
-        rewriter, loc, adaptor.getMemref());
-    auto base = metadata.getBaseBuffer();
-    auto offset = metadata.getOffset();
-    mlir::ValueRange shape = adaptor.getShape();
-    unsigned rank = op.getRank();
-    mlir::SmallVector<mlir::OpFoldResult> sizes(shape);
-    mlir::SmallVector<mlir::OpFoldResult> strides = {rewriter.getIndexAttr(1)};
-
-    mlir::Value stride = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
-    for (unsigned i = 0; i < rank - 1; ++i) {
-      stride = mlir::arith::MulIOp::create(rewriter, loc, stride, shape[i]);
-      strides.push_back(stride);
-    }
-
-    auto casted = mlir::memref::ReinterpretCastOp::create(
-        rewriter, loc, base, offset, sizes, strides);
+    mlir::Value memref =
+        makeFIRMemref(rewriter, loc, adaptor.getMemref(), adaptor.getShape());
 
     auto one = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
     auto offsets = llvm::map_to_vector(
@@ -155,10 +181,11 @@ public:
           idx = mlir::arith::SubIOp::create(rewriter, loc, idx, one);
           return idx;
         });
-    mlir::SmallVector<mlir::OpFoldResult> ones(rank, rewriter.getIndexAttr(1));
+    mlir::SmallVector<mlir::OpFoldResult> ones(op.getRank(),
+                                               rewriter.getIndexAttr(1));
 
     auto subview = mlir::memref::SubViewOp::create(rewriter, loc, resultType,
-                                                   casted, offsets, ones, ones);
+                                                   memref, offsets, ones, ones);
 
     rewriter.replaceOp(op, mlir::ValueRange{subview});
     return mlir::success();
@@ -245,6 +272,18 @@ static mlir::TypeConverter prepareTypeConverter() {
                                                mlir::ShapedType::kDynamic, {});
     return mlir::MemRefType::get({}, converter.convertType(eleTy), layout);
   });
+  converter.addConversion([&](fir::BaseBoxType ty) {
+    mlir::SmallVector<int64_t> shape;
+    auto eleTy = ty.getEleTy();
+    if (auto sequenceTy = mlir::dyn_cast<fir::SequenceType>(eleTy)) {
+      llvm::append_range(shape, sequenceTy.getShape());
+      eleTy = sequenceTy.getElementType();
+    }
+
+    auto layout = mlir::StridedLayoutAttr::get(ty.getContext(),
+                                               mlir::ShapedType::kDynamic, {});
+    return mlir::MemRefType::get(shape, converter.convertType(eleTy), layout);
+  });
 
   // Use UnrealizedConversionCast as the bridge so that we don't need to pull
   // in patterns for other dialects.
@@ -275,11 +314,12 @@ void ConvertFIRToMLIRPass::runOnOperation() {
   mlir::ConversionTarget target(getContext());
 
   patterns.add<FIRNoReassocOpLowering, FIRAllocOpLowering, FIRLoadOpLowering,
-               FIRStoreOpLowering, FIRConvertOpLowering,
+               FIRStoreOpLowering, FIRConvertOpLowering, FIRXEmboxLowering,
                FIRXArrayCoorOpLowering, FuncOpLowering>(converter, ctx);
 
   target.addIllegalOp<fir::AllocaOp, fir::LoadOp, fir::StoreOp, fir::ConvertOp,
-                      fir::cg::XArrayCoorOp, fir::NoReassocOp>();
+                      fir::cg::XArrayCoorOp, fir::cg::XEmboxOp,
+                      fir::NoReassocOp>();
   target.addDynamicallyLegalOp<mlir::func::FuncOp>([](mlir::func::FuncOp op) {
     return !llvm::any_of(llvm::concat<const mlir::Type>(op.getResultTypes(),
                                                         op.getArgumentTypes()),
