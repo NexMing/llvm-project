@@ -192,6 +192,59 @@ struct SoftmaxOpInterface
   }
 };
 
+struct CustomOpInterface
+    : public DstBufferizableOpInterfaceExternalModel<CustomOpInterface,
+                                                     linalg::CustomOp> {
+  bool bufferizesToMemoryRead(Operation *op, OpOperand &opOperand,
+                              const AnalysisState &state) const {
+    auto customOp = cast<linalg::CustomOp>(op);
+    // Opaque custom kernels may use their destination operands as accumulators.
+    return customOp.isDpsInput(&opOperand) || customOp.isDpsInit(&opOperand);
+  }
+
+  LogicalResult bufferize(Operation *op, RewriterBase &rewriter,
+                          const BufferizationOptions &options,
+                          BufferizationState &state) const {
+    auto customOp = cast<linalg::CustomOp>(op);
+    assert(!customOp.hasPureBufferSemantics() && "expected op with tensors");
+    if (!customOp.hasPureTensorSemantics())
+      return customOp.emitError()
+             << "mixed tensor/buffer semantic op not supported yet";
+
+    SmallVector<Value> newInputs;
+    newInputs.reserve(customOp.getNumDpsInputs());
+    for (OpOperand *opOperand : customOp.getDpsInputOperands()) {
+      if (customOp.isScalar(opOperand)) {
+        newInputs.push_back(opOperand->get());
+        continue;
+      }
+      FailureOr<Value> buffer =
+          getBuffer(rewriter, opOperand->get(), options, state);
+      if (failed(buffer))
+        return failure();
+      newInputs.push_back(*buffer);
+    }
+
+    SmallVector<Value> newOutputs;
+    for (OpResult opResult : customOp->getOpResults()) {
+      OpOperand *opOperand =
+          customOp.getDpsInitOperand(opResult.getResultNumber());
+      FailureOr<Value> buffer =
+          getBuffer(rewriter, opOperand->get(), options, state);
+      if (failed(buffer))
+        return failure();
+      newOutputs.push_back(*buffer);
+    }
+
+    linalg::CustomOp::create(rewriter, customOp.getLoc(), TypeRange{},
+                             newInputs, newOutputs, customOp.getOperatorName(),
+                             customOp.getDomainName(),
+                             customOp.getImplementationAttrs());
+    replaceOpWithBufferizedValues(rewriter, op, newOutputs);
+    return success();
+  }
+};
+
 struct PackOpInterface
     : public DstBufferizableOpInterfaceExternalModel<PackOpInterface,
                                                      linalg::PackOp> {
@@ -284,6 +337,7 @@ void mlir::linalg::registerBufferizableOpInterfaceExternalModels(
         >::registerOpInterface(ctx);
 
     SoftmaxOp::attachInterface<SoftmaxOpInterface>(*ctx);
+    CustomOp::attachInterface<CustomOpInterface>(*ctx);
     PackOp::attachInterface<PackOpInterface>(*ctx);
     UnPackOp::attachInterface<UnPackOpInterface>(*ctx);
   });

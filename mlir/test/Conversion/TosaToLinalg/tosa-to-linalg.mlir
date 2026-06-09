@@ -1,6 +1,70 @@
 // RUN: mlir-opt --split-input-file -pass-pipeline="builtin.module(func.func(tosa-to-linalg))" %s -verify-diagnostics -o -| FileCheck %s
+// RUN: mlir-opt --split-input-file -pass-pipeline="builtin.module(func.func(tosa-to-linalg))" %s -verify-diagnostics -o -| FileCheck %s --check-prefix=CUSTOM
 
 // CHECK: #[[$MAP0:.*]] = affine_map<() -> ()>
+
+// CUSTOM-LABEL: @test_custom_static
+// CUSTOM-SAME: %[[ARG0:[0-9a-zA-Z_]*]]
+func.func @test_custom_static(%arg0: tensor<4xf32>) -> tensor<4xf32> {
+  // CUSTOM: %[[INIT:.*]] = tensor.empty() : tensor<4xf32>
+  // CUSTOM: %[[CUSTOM:.*]] = linalg.custom
+  // CUSTOM-SAME: domain_name = "vendor_npu"
+  // CUSTOM-SAME: implementation_attrs = "opaque"
+  // CUSTOM-SAME: operator_name = "fused_relu"
+  // CUSTOM-SAME: ins(%[[ARG0]] : tensor<4xf32>)
+  // CUSTOM-SAME: outs(%[[INIT]] : tensor<4xf32>) -> tensor<4xf32>
+  %0 = tosa.custom %arg0 {
+      domain_name = "vendor_npu",
+      implementation_attrs = "opaque",
+      operator_name = "fused_relu"} : (tensor<4xf32>) -> tensor<4xf32>
+  // CUSTOM: return %[[CUSTOM]] : tensor<4xf32>
+  return %0 : tensor<4xf32>
+}
+
+// -----
+
+// CUSTOM-LABEL: @test_custom_dynamic
+// CUSTOM-SAME: %[[ARG0:[0-9a-zA-Z_]*]]
+func.func @test_custom_dynamic(%arg0: tensor<?x4xf32>) -> tensor<?x4xf32> {
+  // CUSTOM: %[[C0:.*]] = arith.constant 0 : index
+  // CUSTOM: %[[DIM0:.*]] = tensor.dim %[[ARG0]], %[[C0]] : tensor<?x4xf32>
+  // CUSTOM: %[[INIT:.*]] = tensor.empty(%[[DIM0]]) : tensor<?x4xf32>
+  // CUSTOM: %[[CUSTOM:.*]] = linalg.custom
+  // CUSTOM-SAME: domain_name = "vendor_npu"
+  // CUSTOM-SAME: implementation_attrs = "opaque"
+  // CUSTOM-SAME: operator_name = "dynamic_kernel"
+  // CUSTOM-SAME: ins(%[[ARG0]] : tensor<?x4xf32>)
+  // CUSTOM-SAME: outs(%[[INIT]] : tensor<?x4xf32>) -> tensor<?x4xf32>
+  %0 = tosa.custom %arg0 {
+      domain_name = "vendor_npu",
+      implementation_attrs = "opaque",
+      operator_name = "dynamic_kernel"} : (tensor<?x4xf32>) -> tensor<?x4xf32>
+  // CUSTOM: return %[[CUSTOM]] : tensor<?x4xf32>
+  return %0 : tensor<?x4xf32>
+}
+
+// -----
+
+// CUSTOM-LABEL: @test_custom_multi_result
+// CUSTOM-SAME: %[[ARG0:[0-9a-zA-Z_]*]]
+func.func @test_custom_multi_result(%arg0: tensor<4xf32>) -> (tensor<4xf32>, tensor<4xi32>) {
+  // CUSTOM-DAG: %[[INIT0:.*]] = tensor.empty() : tensor<4xf32>
+  // CUSTOM-DAG: %[[INIT1:.*]] = tensor.empty() : tensor<4xi32>
+  // CUSTOM: %[[CUSTOM:.*]]:2 = linalg.custom
+  // CUSTOM-SAME: domain_name = "vendor_npu"
+  // CUSTOM-SAME: implementation_attrs = "opaque"
+  // CUSTOM-SAME: operator_name = "split_kernel"
+  // CUSTOM-SAME: ins(%[[ARG0]] : tensor<4xf32>)
+  // CUSTOM-SAME: outs(%[[INIT0]], %[[INIT1]] : tensor<4xf32>, tensor<4xi32>) -> tensor<4xf32>, tensor<4xi32>
+  %0:2 = tosa.custom %arg0 {
+      domain_name = "vendor_npu",
+      implementation_attrs = "opaque",
+      operator_name = "split_kernel"} : (tensor<4xf32>) -> (tensor<4xf32>, tensor<4xi32>)
+  // CUSTOM: return %[[CUSTOM]]#0, %[[CUSTOM]]#1 : tensor<4xf32>, tensor<4xi32>
+  return %0#0, %0#1 : tensor<4xf32>, tensor<4xi32>
+}
+
+// -----
 
 // CHECK-LABEL: @test_abs_scalar
 // CHECK-SAME: ([[ARG0:%[0-9a-zA-Z_]*]]

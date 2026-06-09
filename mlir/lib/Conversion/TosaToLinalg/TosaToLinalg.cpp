@@ -1374,6 +1374,62 @@ static LogicalResult reduceMatchAndRewriteHelper(OpTy op, uint64_t axis,
 
 namespace {
 
+class CustomConverter : public OpConversionPattern<tosa::CustomOp> {
+public:
+  using OpConversionPattern<tosa::CustomOp>::OpConversionPattern;
+  using OpAdaptor = typename OpConversionPattern<tosa::CustomOp>::OpAdaptor;
+
+  LogicalResult
+  matchAndRewrite(tosa::CustomOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const final {
+    Location loc = op.getLoc();
+
+    SmallVector<Type> convertedResultTypes;
+    if (failed(getTypeConverter()->convertTypes(op.getResultTypes(),
+                                                convertedResultTypes)))
+      return rewriter.notifyMatchFailure(op, "failed to convert result types");
+
+    SmallVector<Value> outputTensors;
+    outputTensors.reserve(convertedResultTypes.size());
+    IndexPool indexPool;
+    for (Type resultType : convertedResultTypes) {
+      auto rankedResultType = dyn_cast<RankedTensorType>(resultType);
+      if (!rankedResultType)
+        return rewriter.notifyMatchFailure(op,
+                                           "unranked tensors not supported");
+
+      SmallVector<OpFoldResult> resultShape;
+      for (auto dim : llvm::seq<int64_t>(0, rankedResultType.getRank())) {
+        if (!rankedResultType.isDynamicDim(dim)) {
+          resultShape.push_back(
+              rewriter.getIndexAttr(rankedResultType.getDimSize(dim)));
+          continue;
+        }
+
+        auto source = llvm::find_if(adaptor.getOperands(), [&](Value input) {
+          auto inputType = dyn_cast<RankedTensorType>(input.getType());
+          return inputType && inputType.getRank() == rankedResultType.getRank();
+        });
+        if (source == adaptor.getOperands().end())
+          return rewriter.notifyMatchFailure(
+              op, "dynamic result dimension has no same-rank input");
+        resultShape.push_back(
+            getTensorDim(rewriter, loc, indexPool, *source, dim));
+      }
+
+      outputTensors.push_back(tensor::EmptyOp::create(
+          rewriter, loc, resultShape, rankedResultType.getElementType()));
+    }
+
+    auto linalgCustom = linalg::CustomOp::create(
+        rewriter, loc, convertedResultTypes, adaptor.getOperands(),
+        outputTensors, op.getOperatorName(), op.getDomainName(),
+        op.getImplementationAttrs());
+    rewriter.replaceOp(op, linalgCustom.getResults());
+    return success();
+  }
+};
+
 template <typename SrcOp>
 class PointwiseConverter : public OpConversionPattern<SrcOp> {
 public:
@@ -3041,6 +3097,7 @@ void mlir::tosa::populateTosaToLinalgConversionPatterns(
 
   patterns->add<
       // clang-format off
+      CustomConverter,
       PointwiseConverter<tosa::AddOp>,
       PointwiseConverter<tosa::SubOp>,
       PointwiseConverter<tosa::MulOp>,

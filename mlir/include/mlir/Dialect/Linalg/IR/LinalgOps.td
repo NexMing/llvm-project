@@ -91,6 +91,60 @@ def Linalg_IndexOp : Linalg_Op<"index", [Pure]>,
   let hasFolder = 1;
 }
 
+def Linalg_CustomOp : Linalg_Op<"custom", [
+    AttrSizedOperandSegments,
+    DestinationStyleOpInterface,
+    DeclareOpInterfaceMethods<MemoryEffectsOpInterface>]> {
+  let summary = "Custom destination-style operator wrapper for Linalg";
+  let description = [{
+    `linalg.custom` represents an opaque, backend-specific kernel in
+    destination-passing style. It is intended for targets that want to preserve
+    a custom fused operation after tensor-to-memref bufferization without
+    spelling out scalar computation in a `linalg.generic` region.
+
+    `operator_name` identifies the backend custom operator.
+    `domain_name` is a string namespace that can help avoid name collisions.
+    `implementation_attrs` is an opaque backend- and operator-specific string.
+
+    The op reads its `ins` operands and writes its `outs` operands. Tensor
+    `outs` are tied to tensor results through `DestinationStyleOpInterface`;
+    after bufferization the same op has memref `outs` and no results.
+
+    Example:
+
+    ```mlir
+    %out = linalg.custom {
+        domain_name = "vendor_npu",
+        operator_name = "fused_attention",
+        implementation_attrs = "..."}
+      ins(%query, %key, %value
+          : tensor<1x128x64xf32>, tensor<1x128x64xf32>,
+            tensor<1x128x64xf32>)
+      outs(%init : tensor<1x128x64xf32>) -> tensor<1x128x64xf32>
+    ```
+  }];
+
+  let arguments = (ins
+    Variadic<AnyType>:$inputs,
+    Variadic<AnyShaped>:$outputs,
+    StrAttr:$operator_name,
+    StrAttr:$domain_name,
+    StrAttr:$implementation_attrs
+  );
+  let results = (outs Variadic<AnyTensor>:$result_tensors);
+
+  let assemblyFormat = [{
+    attr-dict
+    `ins` `(` $inputs `:` type($inputs) `)`
+    `outs` `(` $outputs `:` type($outputs) `)`
+    (`->` type($result_tensors)^)?
+  }];
+
+  let extraClassDeclaration = [{
+    MutableOperandRange getDpsInitsMutable() { return getOutputsMutable(); }
+  }];
+}
+
 def Linalg_SoftmaxOp : Linalg_Op<"softmax",
     [DestinationStyleOpInterface,
      PredOpTrait<"input and output have same element type", TCopVTEtIsSameAs<0, 1>>,

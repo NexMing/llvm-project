@@ -1,5 +1,16 @@
 // RUN: mlir-opt --split-input-file -pass-pipeline="builtin.module(func.func(tosa-to-linalg))" %s -verify-diagnostics
 
+func.func @custom_dynamic_result_without_dim_source() -> tensor<?xf32> {
+  // expected-error@+1 {{failed to legalize operation 'tosa.custom'}}
+  %0 = tosa.custom {
+      domain_name = "vendor_npu",
+      implementation_attrs = "opaque",
+      operator_name = "dynamic_kernel"} : () -> tensor<?xf32>
+  return %0 : tensor<?xf32>
+}
+
+// -----
+
 // CHECK-LABEL: @avg_pool2d_with_unsupported_quant_type
 func.func @avg_pool2d_with_unsupported_quant_type(%arg0: tensor<1x7x7x9x!quant.uniform<i8:f32, 0.01>>, %arg1: tensor<1xi8>, %arg2: tensor<1xi8>) -> tensor<1x7x7x9x!quant.uniform<i8:f32, 0.01>> {
   // expected-error@+1 {{failed to legalize operation 'tosa.avg_pool2d'}}
